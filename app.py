@@ -1,828 +1,378 @@
 from flask import Flask, render_template_string, request
 from flask_socketio import SocketIO, emit
+import sqlite3
 from datetime import datetime
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = "codevault-secret"
+app.config["SECRET_KEY"] = "codevault-secret-key"
 
-socketio = SocketIO(app, cors_allowed_origins="*")
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode="gevent"
+)
 
-HTML = r"""
+DB = "chat.db"
+
+
+def init_db():
+    conn = sqlite3.connect(DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            message TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_messages():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+
+    rows = conn.execute("""
+        SELECT username, message, timestamp
+        FROM messages
+        ORDER BY id ASC
+    """).fetchall()
+
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def save_message(username, message):
+    timestamp = datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+    conn = sqlite3.connect(DB)
+
+    conn.execute(
+        """
+        INSERT INTO messages (username, message, timestamp)
+        VALUES (?, ?, ?)
+        """,
+        (username, message, timestamp)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return timestamp
+
+
+@app.route("/")
+def home():
+    return render_template_string("""
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1">
 
-<title>CodeVault</title>
+    <title>CodeVault</title>
 
-<style>
-* {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-    font-family: Arial, sans-serif;
-}
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
-body {
-    background: #080b12;
-    color: white;
-}
+    <style>
+        * {
+            box-sizing: border-box;
+        }
 
-.container {
-    width: 92%;
-    max-width: 1150px;
-    margin: auto;
-    padding: 25px 0 60px;
-}
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #0b1020;
+            color: white;
+        }
 
-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 25px;
-}
+        header {
+            padding: 18px;
+            background: #111827;
+            border-bottom: 1px solid #273244;
+            font-size: 22px;
+            font-weight: bold;
+        }
 
-.logo {
-    font-size: 26px;
-    font-weight: bold;
-}
+        .container {
+            max-width: 900px;
+            margin: auto;
+            padding: 20px;
+        }
 
-.logo span {
-    color: #7182ff;
-}
+        .dashboard {
+            display: grid;
+            grid-template-columns:
+                repeat(auto-fit, minmax(130px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
 
-.online {
-    background: #141a28;
-    padding: 10px 15px;
-    border-radius: 14px;
-    color: #65d99a;
-}
+        .card {
+            background: #151e30;
+            padding: 18px;
+            border-radius: 14px;
+            text-align: center;
+        }
 
-.hero {
-    background: linear-gradient(135deg, #151d3b, #101522);
-    border: 1px solid #252d49;
-    border-radius: 25px;
-    padding: 30px;
-    margin-bottom: 20px;
-}
+        .card b {
+            display: block;
+            font-size: 25px;
+            margin-bottom: 5px;
+        }
 
-.hero h1 {
-    font-size: 30px;
-    margin-bottom: 10px;
-}
+        .chat {
+            background: #111827;
+            border-radius: 16px;
+            overflow: hidden;
+            border: 1px solid #273244;
+        }
 
-.hero p {
-    color: #8e98b4;
-}
+        .chat-header {
+            padding: 16px;
+            font-size: 19px;
+            font-weight: bold;
+            border-bottom: 1px solid #273244;
+        }
 
-button {
-    border: 0;
-    padding: 11px 17px;
-    border-radius: 12px;
-    background: #7182ff;
-    color: white;
-    font-weight: bold;
-    cursor: pointer;
-}
+        #messages {
+            height: 430px;
+            overflow-y: auto;
+            padding: 15px;
+        }
 
-button:hover {
-    opacity: .85;
-}
+        .message {
+            background: #1b2638;
+            padding: 10px 13px;
+            margin-bottom: 10px;
+            border-radius: 12px;
+        }
 
-.red {
-    background: #df5863;
-}
+        .username {
+            font-weight: bold;
+            margin-bottom: 4px;
+        }
 
-.green {
-    background: #31ad76;
-}
+        .time {
+            font-size: 11px;
+            opacity: .55;
+            margin-top: 5px;
+        }
 
-.grid {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 15px;
-}
+        .input-area {
+            display: flex;
+            gap: 8px;
+            padding: 12px;
+            border-top: 1px solid #273244;
+        }
 
-.card {
-    background: #111621;
-    border: 1px solid #222a40;
-    border-radius: 20px;
-    padding: 20px;
-}
+        input {
+            flex: 1;
+            padding: 13px;
+            border-radius: 10px;
+            border: 1px solid #344154;
+            background: #0b1020;
+            color: white;
+            outline: none;
+        }
 
-.label {
-    color: #8993ad;
-    font-size: 13px;
-    margin-bottom: 10px;
-}
+        button {
+            border: none;
+            padding: 13px 18px;
+            border-radius: 10px;
+            background: #2563eb;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
 
-.number {
-    font-size: 30px;
-    font-weight: bold;
-}
+        button:hover {
+            opacity: .9;
+        }
 
-.section {
-    margin-top: 30px;
-}
-
-.section h2 {
-    margin-bottom: 15px;
-}
-
-.form {
-    display: flex;
-    gap: 8px;
-    margin-bottom: 15px;
-}
-
-input,
-select {
-    flex: 1;
-    padding: 13px;
-    border-radius: 12px;
-    border: 1px solid #29324b;
-    background: #0d121d;
-    color: white;
-    outline: none;
-}
-
-.skills,
-.projects {
-    display: grid;
-    grid-template-columns: repeat(2, 1fr);
-    gap: 15px;
-}
-
-.skill,
-.project {
-    background: #111621;
-    border: 1px solid #222a40;
-    border-radius: 18px;
-    padding: 20px;
-}
-
-.skill-top {
-    display: flex;
-    justify-content: space-between;
-}
-
-.bar {
-    height: 8px;
-    background: #252d43;
-    border-radius: 20px;
-    overflow: hidden;
-    margin: 12px 0;
-}
-
-.fill {
-    height: 100%;
-    background: #7182ff;
-}
-
-.status {
-    display: inline-block;
-    margin: 12px 0;
-    padding: 6px 10px;
-    border-radius: 8px;
-    background: #29324b;
-    font-size: 12px;
-}
-
-/* CHAT */
-
-.chat-box {
-    background: #111621;
-    border: 1px solid #222a40;
-    border-radius: 20px;
-    overflow: hidden;
-}
-
-.chat-header {
-    padding: 18px 20px;
-    border-bottom: 1px solid #222a40;
-}
-
-.messages {
-    height: 400px;
-    overflow-y: auto;
-    padding: 18px;
-}
-
-.message {
-    margin-bottom: 14px;
-}
-
-.message-name {
-    color: #7182ff;
-    font-weight: bold;
-    margin-bottom: 4px;
-}
-
-.message-text {
-    background: #1a2132;
-    padding: 10px 13px;
-    border-radius: 12px;
-    display: inline-block;
-    max-width: 85%;
-    word-break: break-word;
-}
-
-.message-time {
-    color: #69748f;
-    font-size: 11px;
-    margin-left: 7px;
-}
-
-.system {
-    color: #69748f;
-    text-align: center;
-    margin: 12px;
-    font-size: 13px;
-}
-
-.chat-input {
-    display: flex;
-    gap: 8px;
-    padding: 15px;
-    border-top: 1px solid #222a40;
-}
-
-.chat-input input {
-    min-width: 0;
-}
-
-.empty {
-    color: #737e99;
-    padding: 15px 0;
-}
-
-@media(max-width: 800px) {
-    .grid {
-        grid-template-columns: repeat(2, 1fr);
-    }
-
-    .skills,
-    .projects {
-        grid-template-columns: 1fr;
-    }
-}
-
-@media(max-width: 550px) {
-    .grid {
-        grid-template-columns: 1fr;
-    }
-
-    .form,
-    .chat-input {
-        flex-direction: column;
-    }
-
-    .hero h1 {
-        font-size: 24px;
-    }
-
-    .messages {
-        height: 350px;
-    }
-}
-</style>
+        .status {
+            padding: 10px 15px;
+            font-size: 13px;
+            opacity: .7;
+        }
+    </style>
 </head>
 
 <body>
 
-<div class="container">
-
 <header>
-    <div class="logo">
-        Code<span>Vault</span> 💻
-    </div>
-
-    <div class="online">
-        🟢 <span id="online">0</span> online
-    </div>
+    💻 CodeVault
 </header>
 
+<div class="container">
 
-<section class="hero">
+    <div class="dashboard">
+        <div class="card">
+            <b>🐍</b>
+            Python
+        </div>
 
-    <h1 id="welcome">
-        Welcome, Developer 👋
-    </h1>
+        <div class="card">
+            <b>📊</b>
+            Skills
+        </div>
 
-    <p>
-        Track your coding journey and connect with other developers.
-    </p>
-
-    <br>
-
-    <button onclick="setName()">
-        Set Developer Name
-    </button>
-
-</section>
-
-
-<div class="grid">
-
-    <div class="card">
-        <div class="label">CODING HOURS</div>
-        <div class="number" id="hours">0</div>
+        <div class="card">
+            <b>🚀</b>
+            Projects
+        </div>
     </div>
 
-    <div class="card">
-        <div class="label">SKILLS</div>
-        <div class="number" id="skillCount">0</div>
+    <div class="chat">
+
+        <div class="chat-header">
+            💬 CodeVault Chat
+        </div>
+
+        <div class="status" id="status">
+            Connecting...
+        </div>
+
+        <div id="messages"></div>
+
+        <div class="input-area">
+
+            <input
+                id="username"
+                placeholder="Your name"
+                maxlength="30"
+            >
+
+            <input
+                id="message"
+                placeholder="Type a message..."
+                maxlength="500"
+            >
+
+            <button onclick="sendMessage()">
+                Send
+            </button>
+
+        </div>
+
     </div>
 
-    <div class="card">
-        <div class="label">PROJECTS</div>
-        <div class="number" id="projectCount">0</div>
-    </div>
-
-    <div class="card">
-        <div class="label">COMPLETED</div>
-        <div class="number" id="completed">0</div>
-    </div>
-
 </div>
 
-
-<!-- SKILLS -->
-
-<div class="section">
-
-<h2>🧠 My Skills</h2>
-
-<div class="form">
-
-<input
-    id="skillName"
-    placeholder="Skill name e.g. Python"
->
-
-<input
-    id="skillProgress"
-    type="number"
-    min="0"
-    max="100"
-    placeholder="Progress %"
->
-
-<button onclick="addSkill()">
-    Add
-</button>
-
-</div>
-
-<div class="skills" id="skills"></div>
-
-</div>
-
-
-<!-- PROJECTS -->
-
-<div class="section">
-
-<h2>🚀 My Projects</h2>
-
-<div class="form">
-
-<input
-    id="projectName"
-    placeholder="Project name"
->
-
-<input
-    id="projectDescription"
-    placeholder="Short description"
->
-
-<select id="projectStatus">
-    <option>Planning</option>
-    <option>In Progress</option>
-    <option>Completed</option>
-</select>
-
-<button onclick="addProject()">
-    Add
-</button>
-
-</div>
-
-<div class="projects" id="projects"></div>
-
-</div>
-
-
-<!-- REAL TIME CHAT -->
-
-<div class="section">
-
-<h2>💬 Developer Chat</h2>
-
-<div class="chat-box">
-
-<div class="chat-header">
-    <strong>🌐 Global Coding Chat</strong>
-    <p style="color:#8993ad;margin-top:5px">
-        Chat with other developers in real time.
-    </p>
-</div>
-
-<div class="messages" id="messages"></div>
-
-<div class="chat-input">
-
-<input
-    id="messageInput"
-    placeholder="Write a message..."
-    autocomplete="off"
->
-
-<button onclick="sendMessage()">
-    Send
-</button>
-
-</div>
-
-</div>
-
-</div>
-
-</div>
-
-
-<script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
 
 <script>
 
-/* LOCAL DASHBOARD DATA */
-
-let skills =
-JSON.parse(localStorage.getItem("cv_skills")) || [];
-
-let projects =
-JSON.parse(localStorage.getItem("cv_projects")) || [];
-
-let codingMinutes =
-Number(localStorage.getItem("cv_minutes")) || 0;
-
-let completed =
-Number(localStorage.getItem("cv_completed")) || 0;
-
-let developerName =
-localStorage.getItem("cv_name") || "";
-
-
-/* NAME */
-
-function setName() {
-
-    let name = prompt("Enter your developer name:");
-
-    if (!name) return;
-
-    developerName = name.trim();
-
-    localStorage.setItem(
-        "cv_name",
-        developerName
-    );
-
-    render();
-
-}
-
-
-/* SKILLS */
-
-function addSkill() {
-
-    let name =
-        document.getElementById("skillName")
-        .value.trim();
-
-    let progress =
-        Number(
-            document.getElementById("skillProgress")
-            .value
-        );
-
-    if (!name) {
-        alert("Enter skill name!");
-        return;
-    }
-
-    if (
-        isNaN(progress) ||
-        progress < 0 ||
-        progress > 100
-    ) {
-        alert("Progress must be between 0 and 100!");
-        return;
-    }
-
-    skills.push({
-        name: name,
-        progress: progress
-    });
-
-    document.getElementById("skillName").value = "";
-    document.getElementById("skillProgress").value = "";
-
-    save();
-    render();
-}
-
-
-function deleteSkill(index) {
-
-    skills.splice(index, 1);
-
-    save();
-    render();
-
-}
-
-
-/* PROJECTS */
-
-function addProject() {
-
-    let name =
-        document.getElementById("projectName")
-        .value.trim();
-
-    let description =
-        document.getElementById("projectDescription")
-        .value.trim();
-
-    let status =
-        document.getElementById("projectStatus")
-        .value;
-
-    if (!name) {
-        alert("Enter project name!");
-        return;
-    }
-
-    projects.push({
-        name: name,
-        description: description,
-        status: status
-    });
-
-    document.getElementById("projectName").value = "";
-    document.getElementById("projectDescription").value = "";
-
-    save();
-    render();
-
-}
-
-
-function deleteProject(index) {
-
-    projects.splice(index, 1);
-
-    save();
-    render();
-
-}
-
-
-function completeProject(index) {
-
-    if (projects[index].status !== "Completed") {
-
-        projects[index].status = "Completed";
-
-        completed++;
-
-        save();
-        render();
-
-    }
-
-}
-
-
-/* SAVE */
-
-function save() {
-
-    localStorage.setItem(
-        "cv_skills",
-        JSON.stringify(skills)
-    );
-
-    localStorage.setItem(
-        "cv_projects",
-        JSON.stringify(projects)
-    );
-
-    localStorage.setItem(
-        "cv_minutes",
-        codingMinutes
-    );
-
-    localStorage.setItem(
-        "cv_completed",
-        completed
-    );
-
-}
-
-
-/* RENDER */
-
-function render() {
-
-    document.getElementById("hours")
-        .innerText =
-        (codingMinutes / 60).toFixed(1);
-
-    document.getElementById("skillCount")
-        .innerText = skills.length;
-
-    document.getElementById("projectCount")
-        .innerText = projects.length;
-
-    document.getElementById("completed")
-        .innerText = completed;
-
-
-    if (developerName) {
-
-        document.getElementById("welcome")
-            .innerText =
-            "Welcome back, " +
-            developerName +
-            " 👋";
-
-    }
-
-
-    /* SKILLS */
-
-    let skillBox =
-        document.getElementById("skills");
-
-    skillBox.innerHTML = "";
-
-    if (skills.length === 0) {
-
-        skillBox.innerHTML =
-            '<div class="empty">Add your first skill.</div>';
-
-    }
-
-    skills.forEach((skill, index) => {
-
-        skillBox.innerHTML += `
-
-        <div class="skill">
-
-            <div class="skill-top">
-
-                <strong>
-                    💡 ${escapeHTML(skill.name)}
-                </strong>
-
-                <strong>
-                    ${skill.progress}%
-                </strong>
-
-            </div>
-
-            <div class="bar">
-
-                <div
-                    class="fill"
-                    style="width:${skill.progress}%">
-                </div>
-
-            </div>
-
-            <button
-                class="red"
-                onclick="deleteSkill(${index})">
-
-                Remove
-
-            </button>
-
-        </div>
-
-        `;
-
-    });
-
-
-    /* PROJECTS */
-
-    let projectBox =
-        document.getElementById("projects");
-
-    projectBox.innerHTML = "";
-
-    if (projects.length === 0) {
-
-        projectBox.innerHTML =
-            '<div class="empty">Add your first project.</div>';
-
-    }
-
-    projects.forEach((project, index) => {
-
-        projectBox.innerHTML += `
-
-        <div class="project">
-
-            <h3>
-                🚀 ${escapeHTML(project.name)}
-            </h3>
-
-            <p style="color:#8993ad;margin-top:8px">
-                ${escapeHTML(project.description)}
-            </p>
-
-            <div class="status">
-                ${escapeHTML(project.status)}
-            </div>
-
-            <br>
-
-            ${
-                project.status !== "Completed"
-                ?
-                `<button
-                    class="complete"
-                    onclick="completeProject(${index})">
-                    Mark Completed
-                </button>`
-                :
-                ""
-            }
-
-            <button
-                class="red"
-                onclick="deleteProject(${index})">
-                Delete
-            </button>
-
-        </div>
-
-        `;
-
-    });
-
-}
-
-
-function escapeHTML(value) {
-
-    return String(value)
-        .replaceAll("&", "&amp;")
-        .replaceAll("<", "&lt;")
-        .replaceAll(">", "&gt;")
-        .replaceAll('"', "&quot;")
-        .replaceAll("'", "&#039;");
-
-}
-
-
-/* REAL-TIME CHAT */
-
 const socket = io();
 
-const messageInput =
-    document.getElementById("messageInput");
+const messagesBox = document.getElementById("messages");
+const messageInput = document.getElementById("message");
+const usernameInput = document.getElementById("username");
+const statusBox = document.getElementById("status");
 
-const messages =
-    document.getElementById("messages");
+
+function addMessage(data) {
+
+    const div = document.createElement("div");
+
+    div.className = "message";
+
+    div.innerHTML = `
+        <div class="username">
+            ${escapeHTML(data.username)}
+        </div>
+
+        <div>
+            ${escapeHTML(data.message)}
+        </div>
+
+        <div class="time">
+            ${escapeHTML(data.timestamp)}
+        </div>
+    `;
+
+    messagesBox.appendChild(div);
+
+    messagesBox.scrollTop = messagesBox.scrollHeight;
+}
+
+
+function escapeHTML(text) {
+
+    const div = document.createElement("div");
+
+    div.textContent = text;
+
+    return div.innerHTML;
+}
+
+
+socket.on("connect", () => {
+
+    statusBox.textContent = "🟢 Connected";
+
+});
+
+
+socket.on("disconnect", () => {
+
+    statusBox.textContent = "🔴 Disconnected";
+
+});
+
+
+socket.on("chat_history", (messages) => {
+
+    messagesBox.innerHTML = "";
+
+    messages.forEach(addMessage);
+
+});
+
+
+socket.on("new_message", (data) => {
+
+    addMessage(data);
+
+});
 
 
 function sendMessage() {
 
-    let text =
+    const username =
+        usernameInput.value.trim();
+
+    const message =
         messageInput.value.trim();
 
-    if (!text) return;
 
-    let name =
-        developerName || "Anonymous";
+    if (!username) {
 
-    socket.emit(
-        "send_message",
-        {
-            name: name,
-            text: text
-        }
-    );
+        alert("Please enter your name.");
+
+        return;
+    }
+
+
+    if (!message) {
+
+        return;
+    }
+
+
+    socket.emit("send_message", {
+
+        username: username,
+
+        message: message
+
+    });
+
 
     messageInput.value = "";
+
+    messageInput.focus();
 
 }
 
@@ -832,175 +382,73 @@ messageInput.addEventListener(
     function(event) {
 
         if (event.key === "Enter") {
+
             sendMessage();
+
         }
 
     }
 );
 
-
-socket.on(
-    "message",
-    function(data) {
-
-        let div =
-            document.createElement("div");
-
-        div.className = "message";
-
-        let name =
-            document.createElement("div");
-
-        name.className =
-            "message-name";
-
-        name.innerText =
-            data.name;
-
-        let text =
-            document.createElement("span");
-
-        text.className =
-            "message-text";
-
-        text.innerText =
-            data.text;
-
-        let time =
-            document.createElement("span");
-
-        time.className =
-            "message-time";
-
-        time.innerText =
-            data.time;
-
-        div.appendChild(name);
-        div.appendChild(text);
-        div.appendChild(time);
-
-        messages.appendChild(div);
-
-        messages.scrollTop =
-            messages.scrollHeight;
-
-    }
-);
-
-
-socket.on(
-    "system_message",
-    function(text) {
-
-        let div =
-            document.createElement("div");
-
-        div.className = "system";
-
-        div.innerText = text;
-
-        messages.appendChild(div);
-
-        messages.scrollTop =
-            messages.scrollHeight;
-
-    }
-);
-
-
-socket.on(
-    "online_count",
-    function(count) {
-
-        document.getElementById("online")
-            .innerText = count;
-
-    }
-);
-
-
-render();
-
 </script>
 
 </body>
 </html>
-"""
-
-
-@app.route("/")
-def index():
-    return render_template_string(HTML)
-
-
-connected_users = 0
+    """)
 
 
 @socketio.on("connect")
-def user_connect():
-
-    global connected_users
-
-    connected_users += 1
+def handle_connect():
 
     emit(
-        "online_count",
-        connected_users,
-        broadcast=True
-    )
-
-    emit(
-        "system_message",
-        "🟢 You joined the developer chat."
-    )
-
-
-@socketio.on("disconnect")
-def user_disconnect():
-
-    global connected_users
-
-    connected_users = max(
-        0,
-        connected_users - 1
-    )
-
-    socketio.emit(
-        "online_count",
-        connected_users
+        "chat_history",
+        get_messages()
     )
 
 
 @socketio.on("send_message")
 def handle_message(data):
 
-    name = str(
-        data.get("name", "Anonymous")
-    )[:30]
+    username = str(
+        data.get("username", "Anonymous")
+    ).strip()
 
-    text = str(
-        data.get("text", "")
-    ).strip()[:500]
+    message = str(
+        data.get("message", "")
+    ).strip()
 
-    if not text:
+
+    if not username or not message:
         return
 
-    now = datetime.now().strftime("%H:%M")
+
+    username = username[:30]
+    message = message[:500]
+
+
+    timestamp = save_message(
+        username,
+        message
+    )
+
 
     socketio.emit(
-        "message",
+        "new_message",
         {
-            "name": name,
-            "text": text,
-            "time": now
+            "username": username,
+            "message": message,
+            "timestamp": timestamp
         }
     )
 
 
+init_db()
+
+
 if __name__ == "__main__":
+
     socketio.run(
         app,
         host="0.0.0.0",
-        port=5000,
-        allow_unsafe_werkzeug=True
+        port=5000
     )
