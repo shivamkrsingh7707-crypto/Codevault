@@ -1,170 +1,454 @@
-mkdir templates
-cat << 'EOF' > templates/index.html
+from flask import Flask, render_template_string, request
+from flask_socketio import SocketIO, emit
+import sqlite3
+from datetime import datetime
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = "codevault-secret-key"
+
+socketio = SocketIO(
+    app,
+    cors_allowed_origins="*",
+    async_mode="gevent"
+)
+
+DB = "chat.db"
+
+
+def init_db():
+    conn = sqlite3.connect(DB)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL,
+            message TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def get_messages():
+    conn = sqlite3.connect(DB)
+    conn.row_factory = sqlite3.Row
+
+    rows = conn.execute("""
+        SELECT username, message, timestamp
+        FROM messages
+        ORDER BY id ASC
+    """).fetchall()
+
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def save_message(username, message):
+    timestamp = datetime.now().strftime("%d %b %Y, %I:%M %p")
+
+    conn = sqlite3.connect(DB)
+
+    conn.execute(
+        """
+        INSERT INTO messages (username, message, timestamp)
+        VALUES (?, ?, ?)
+        """,
+        (username, message, timestamp)
+    )
+
+    conn.commit()
+    conn.close()
+
+    return timestamp
+
+
+@app.route("/")
+def home():
+    return render_template_string("""
 <!DOCTYPE html>
-<html lang="en" data-theme="dark">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Global Coder Chat</title>
-    <!-- Highlight.js for code formatting -->
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css" id="hl-style">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <meta name="viewport"
+          content="width=device-width, initial-scale=1">
+
+    <title>CodeVault</title>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
     <style>
-        /* Theme Variables */
-        :root {
-            --bg-color: #f0f2f5;
-            --container-bg: #ffffff;
-            --text-color: #1a1a1a;
-            --text-muted: #666;
-            --border-color: #e4e6eb;
-            --msg-bg: #f2f2f2;
-            --primary: #0a7cff;
-            --primary-hover: #0066d6;
-        }
-        [data-theme="dark"] {
-            --bg-color: #121212;
-            --container-bg: #1e1e1e;
-            --text-color: #e4e6eb;
-            --text-muted: #b0b3b8;
-            --border-color: #3e4042;
-            --msg-bg: #242526;
-            --primary: #4d94ff;
-            --primary-hover: #3b7cff;
+        * {
+            box-sizing: border-box;
         }
 
-        * { box-sizing: border-box; transition: background-color 0.3s, color 0.3s; }
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: var(--bg-color); color: var(--text-color); margin: 0; display: flex; justify-content: center; height: 100vh; padding: 10px; }
-        
-        .chat-container { width: 100%; max-width: 800px; background: var(--container-bg); display: flex; flex-direction: column; border-radius: 12px; box-shadow: 0 4px 20px rgba(0,0,0,0.1); overflow: hidden; }
-        
-        /* Header */
-        header { display: flex; justify-content: space-between; align-items: center; padding: 15px 20px; border-bottom: 1px solid var(--border-color); }
-        header h2 { margin: 0; font-size: 1.2rem; display: flex; align-items: center; gap: 8px; }
-        
-        /* Theme Toggle Button */
-        .theme-btn { background: transparent; border: 1px solid var(--border-color); color: var(--text-color); padding: 6px 12px; border-radius: 20px; cursor: pointer; font-size: 0.9rem; font-weight: 600; }
-        .theme-btn:hover { background: var(--msg-bg); }
+        body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #0b1020;
+            color: white;
+        }
 
-        /* Chat Area */
-        #messages { flex: 1; overflow-y: auto; padding: 20px; margin: 0; list-style: none; display: flex; flex-direction: column; gap: 12px; }
-        .msg { background: var(--msg-bg); padding: 12px 16px; border-radius: 8px; max-width: 90%; align-self: flex-start; word-wrap: break-word; }
-        .msg-header { font-size: 0.85rem; font-weight: bold; color: var(--primary); margin-bottom: 5px; display: block; }
-        pre { margin: 8px 0 0 0; border-radius: 6px; }
-        
-        /* Input Area */
-        .input-area { padding: 15px; border-top: 1px solid var(--border-color); display: flex; gap: 10px; background: var(--container-bg); }
-        .input-area input { background: var(--msg-bg); color: var(--text-color); border: 1px solid transparent; padding: 12px; border-radius: 8px; font-size: 1rem; outline: none; }
-        .input-area input:focus { border: 1px solid var(--primary); }
-        #username { width: 100px; font-weight: bold; }
-        #msg-input { flex: 1; }
-        button[type="submit"] { background: var(--primary); color: #fff; border: none; padding: 12px 20px; border-radius: 8px; font-size: 1rem; font-weight: bold; cursor: pointer; transition: background 0.2s; }
-        button[type="submit"]:hover { background: var(--primary-hover); }
+        header {
+            padding: 18px;
+            background: #111827;
+            border-bottom: 1px solid #273244;
+            font-size: 22px;
+            font-weight: bold;
+        }
 
-        /* Mobile tweaks */
-        @media (max-width: 500px) {
-            #username { width: 80px; }
-            .input-area { padding: 10px; gap: 5px; }
-            header { padding: 12px; }
+        .container {
+            max-width: 900px;
+            margin: auto;
+            padding: 20px;
+        }
+
+        .dashboard {
+            display: grid;
+            grid-template-columns:
+                repeat(auto-fit, minmax(130px, 1fr));
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .card {
+            background: #151e30;
+            padding: 18px;
+            border-radius: 14px;
+            text-align: center;
+        }
+
+        .card b {
+            display: block;
+            font-size: 25px;
+            margin-bottom: 5px;
+        }
+
+        .chat {
+            background: #111827;
+            border-radius: 16px;
+            overflow: hidden;
+            border: 1px solid #273244;
+        }
+
+        .chat-header {
+            padding: 16px;
+            font-size: 19px;
+            font-weight: bold;
+            border-bottom: 1px solid #273244;
+        }
+
+        #messages {
+            height: 430px;
+            overflow-y: auto;
+            padding: 15px;
+        }
+
+        .message {
+            background: #1b2638;
+            padding: 10px 13px;
+            margin-bottom: 10px;
+            border-radius: 12px;
+        }
+
+        .username {
+            font-weight: bold;
+            margin-bottom: 4px;
+        }
+
+        .time {
+            font-size: 11px;
+            opacity: .55;
+            margin-top: 5px;
+        }
+
+        .input-area {
+            display: flex;
+            gap: 8px;
+            padding: 12px;
+            border-top: 1px solid #273244;
+        }
+
+        input {
+            flex: 1;
+            padding: 13px;
+            border-radius: 10px;
+            border: 1px solid #344154;
+            background: #0b1020;
+            color: white;
+            outline: none;
+        }
+
+        button {
+            border: none;
+            padding: 13px 18px;
+            border-radius: 10px;
+            background: #2563eb;
+            color: white;
+            font-weight: bold;
+            cursor: pointer;
+        }
+
+        button:hover {
+            opacity: .9;
+        }
+
+        .status {
+            padding: 10px 15px;
+            font-size: 13px;
+            opacity: .7;
         }
     </style>
 </head>
+
 <body>
 
-<div class="chat-container">
-    <header>
-        <h2>👨‍💻 Coder Chat</h2>
-        <button class="theme-btn" id="theme-toggle">☀️ Light</button>
-    </header>
-    
-    <ul id="messages"></ul>
+<header>
+    💻 CodeVault
+</header>
 
-    <form class="input-area" id="chat-form">
-        <input type="text" id="username" placeholder="Name" required maxlength="12">
-        <input type="text" id="msg-input" placeholder="Type message or paste code..." autocomplete="off" required>
-        <button type="submit">Send</button>
-    </form>
+<div class="container">
+
+    <div class="dashboard">
+        <div class="card">
+            <b>🐍</b>
+            Python
+        </div>
+
+        <div class="card">
+            <b>📊</b>
+            Skills
+        </div>
+
+        <div class="card">
+            <b>🚀</b>
+            Projects
+        </div>
+    </div>
+
+    <div class="chat">
+
+        <div class="chat-header">
+            💬 CodeVault Chat
+        </div>
+
+        <div class="status" id="status">
+            Connecting...
+        </div>
+
+        <div id="messages"></div>
+
+        <div class="input-area">
+
+            <input
+                id="username"
+                placeholder="Your name"
+                maxlength="30"
+            >
+
+            <input
+                id="message"
+                placeholder="Type a message..."
+                maxlength="500"
+            >
+
+            <button onclick="sendMessage()">
+                Send
+            </button>
+
+        </div>
+
+    </div>
+
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
+
 <script>
-    // Theme Logic
-    const themeToggle = document.getElementById('theme-toggle');
-    const htmlEl = document.documentElement;
-    const hlStyle = document.getElementById('hl-style');
 
-    // Load saved theme
-    const savedTheme = localStorage.getItem('theme') || 'dark';
-    htmlEl.setAttribute('data-theme', savedTheme);
-    updateThemeUI(savedTheme);
+const socket = io();
 
-    themeToggle.addEventListener('click', () => {
-        const currentTheme = htmlEl.getAttribute('data-theme');
-        const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-        htmlEl.setAttribute('data-theme', newTheme);
-        localStorage.setItem('theme', newTheme);
-        updateThemeUI(newTheme);
-    });
+const messagesBox = document.getElementById("messages");
+const messageInput = document.getElementById("message");
+const usernameInput = document.getElementById("username");
+const statusBox = document.getElementById("status");
 
-    function updateThemeUI(theme) {
-        if (theme === 'dark') {
-            themeToggle.innerText = '☀️ Light';
-            hlStyle.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css';
-        } else {
-            themeToggle.innerText = '🌙 Dark';
-            hlStyle.href = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-light.min.css';
-        }
+
+function addMessage(data) {
+
+    const div = document.createElement("div");
+
+    div.className = "message";
+
+    div.innerHTML = `
+        <div class="username">
+            ${escapeHTML(data.username)}
+        </div>
+
+        <div>
+            ${escapeHTML(data.message)}
+        </div>
+
+        <div class="time">
+            ${escapeHTML(data.timestamp)}
+        </div>
+    `;
+
+    messagesBox.appendChild(div);
+
+    messagesBox.scrollTop = messagesBox.scrollHeight;
+}
+
+
+function escapeHTML(text) {
+
+    const div = document.createElement("div");
+
+    div.textContent = text;
+
+    return div.innerHTML;
+}
+
+
+socket.on("connect", () => {
+
+    statusBox.textContent = "🟢 Connected";
+
+});
+
+
+socket.on("disconnect", () => {
+
+    statusBox.textContent = "🔴 Disconnected";
+
+});
+
+
+socket.on("chat_history", (messages) => {
+
+    messagesBox.innerHTML = "";
+
+    messages.forEach(addMessage);
+
+});
+
+
+socket.on("new_message", (data) => {
+
+    addMessage(data);
+
+});
+
+
+function sendMessage() {
+
+    const username =
+        usernameInput.value.trim();
+
+    const message =
+        messageInput.value.trim();
+
+
+    if (!username) {
+
+        alert("Please enter your name.");
+
+        return;
     }
 
-    // Socket.io Chat Logic
-    const socket = io();
-    const chatForm = document.getElementById('chat-form');
-    const msgInput = document.getElementById('msg-input');
-    const usernameInput = document.getElementById('username');
-    const messages = document.getElementById('messages');
 
-    // Safe HTML escape
-    function escapeHtml(text) {
-        return text
-            .replace(/&/g, "&amp;")
-            .replace(/</g, "&lt;")
-            .replace(/>/g, "&gt;")
-            .replace(/"/g, "&quot;")
-            .replace(/'/g, "&#039;");
+    if (!message) {
+
+        return;
     }
 
-    chatForm.addEventListener('submit', (e) => {
-        e.preventDefault();
-        const user = usernameInput.value.trim();
-        const text = msgInput.value.trim();
-        
-        if (user && text) {
-            socket.emit('message', { user, text });
-            msgInput.value = '';
+
+    socket.emit("send_message", {
+
+        username: username,
+
+        message: message
+
+    });
+
+
+    messageInput.value = "";
+
+    messageInput.focus();
+
+}
+
+
+messageInput.addEventListener(
+    "keydown",
+    function(event) {
+
+        if (event.key === "Enter") {
+
+            sendMessage();
+
         }
-    });
 
-    socket.on('message', (data) => {
-        const li = document.createElement('li');
-        li.className = 'msg';
-        
-        const safeUser = escapeHtml(data.user);
-        const safeText = escapeHtml(data.text);
-        
-        // Render as code if it looks like code, else normal text
-        li.innerHTML = `<span class="msg-header">${safeUser}</span>
-                        <pre><code>${safeText}</code></pre>`;
-        
-        messages.appendChild(li);
-        
-        // Apply syntax highlighting to the new message
-        document.querySelectorAll('pre code').forEach((el) => {
-            hljs.highlightElement(el);
-        });
+    }
+);
 
-        // Scroll to bottom smoothly
-        messages.scrollTo({ top: messages.scrollHeight, behavior: 'smooth' });
-    });
 </script>
+
 </body>
 </html>
-EOF
+    """)
+
+
+@socketio.on("connect")
+def handle_connect():
+
+    emit(
+        "chat_history",
+        get_messages()
+    )
+
+
+@socketio.on("send_message")
+def handle_message(data):
+
+    username = str(
+        data.get("username", "Anonymous")
+    ).strip()
+
+    message = str(
+        data.get("message", "")
+    ).strip()
+
+
+    if not username or not message:
+        return
+
+
+    username = username[:30]
+    message = message[:500]
+
+
+    timestamp = save_message(
+        username,
+        message
+    )
+
+
+    socketio.emit(
+        "new_message",
+        {
+            "username": username,
+            "message": message,
+            "timestamp": timestamp
+        }
+    )
+
+
+init_db()
+
+
+if __name__ == "__main__":
+
+    socketio.run(
+        app,
+        host="0.0.0.0",
+        port=5000
+    )
